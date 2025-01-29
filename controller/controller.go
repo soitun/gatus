@@ -1,57 +1,49 @@
 package controller
 
 import (
-	"context"
-	"fmt"
-	"log"
-	"net/http"
 	"os"
 	"time"
 
+	"github.com/TwiN/gatus/v5/api"
 	"github.com/TwiN/gatus/v5/config"
-	"github.com/TwiN/gatus/v5/controller/handler"
+	"github.com/TwiN/logr"
+	"github.com/gofiber/fiber/v2"
 )
 
 var (
-	// server is the http.Server created by Handle.
-	// The only reason it exists is for testing purposes.
-	server *http.Server
+	app *fiber.App
 )
 
 // Handle creates the router and starts the server
 func Handle(cfg *config.Config) {
-	var router http.Handler = handler.CreateRouter(cfg)
-	if os.Getenv("ENVIRONMENT") == "dev" {
-		router = handler.DevelopmentCORS(router)
-	}
-	tlsConfig, err := cfg.Web.TLSConfig()
-	if err != nil {
-		panic(err) // Should be unreachable, because the config is validated before
-	}
-
-	server = &http.Server{
-		Addr:         fmt.Sprintf("%s:%d", cfg.Web.Address, cfg.Web.Port),
-		TLSConfig:    tlsConfig,
-		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  15 * time.Second,
-	}
-	log.Println("[controller][Handle] Listening on " + cfg.Web.SocketAddress())
+	api := api.New(cfg)
+	app = api.Router()
+	server := app.Server()
+	server.ReadTimeout = 15 * time.Second
+	server.WriteTimeout = 15 * time.Second
+	server.IdleTimeout = 15 * time.Second
 	if os.Getenv("ROUTER_TEST") == "true" {
 		return
 	}
-	if tlsConfig != nil {
-		log.Println("[controller][Handle]", server.ListenAndServeTLS("", ""))
+	logr.Info("[controller.Handle] Listening on " + cfg.Web.SocketAddress())
+	if cfg.Web.HasTLS() {
+		err := app.ListenTLS(cfg.Web.SocketAddress(), cfg.Web.TLS.CertificateFile, cfg.Web.TLS.PrivateKeyFile)
+		if err != nil {
+			logr.Fatalf("[controller.Handle] %s", err.Error())
+		}
 	} else {
-		log.Println("[controller][Handle]", server.ListenAndServe())
+		err := app.Listen(cfg.Web.SocketAddress())
+		if err != nil {
+			logr.Fatalf("[controller.Handle] %s", err.Error())
+		}
 	}
+	logr.Info("[controller.Handle] Server has shut down successfully")
 }
 
 // Shutdown stops the server
 func Shutdown() {
-	if server != nil {
-		_ = server.Shutdown(context.TODO())
-		server = nil
+	if app != nil {
+		_ = app.Shutdown()
+		app = nil
 	}
 }
