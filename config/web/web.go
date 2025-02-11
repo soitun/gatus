@@ -2,6 +2,7 @@ package web
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"math"
 )
@@ -12,10 +13,16 @@ const (
 
 	// DefaultPort is the default port the application will listen on
 	DefaultPort = 8080
+
+	// DefaultReadBufferSize is the default value for ReadBufferSize
+	DefaultReadBufferSize = 8192
+
+	// MinimumReadBufferSize is the minimum value for ReadBufferSize, and also the default value set
+	// for fiber.Config.ReadBufferSize
+	MinimumReadBufferSize = 4096
 )
 
-// Config is the structure which supports the configuration of the endpoint
-// which provides access to the web frontend
+// Config is the structure which supports the configuration of the server listening to requests
 type Config struct {
 	// Address to listen on (defaults to 0.0.0.0 specified by DefaultAddress)
 	Address string `yaml:"address"`
@@ -23,25 +30,33 @@ type Config struct {
 	// Port to listen on (default to 8080 specified by DefaultPort)
 	Port int `yaml:"port"`
 
-	// TLS configuration
-	Tls TLSConfig `yaml:"tls"`
+	// ReadBufferSize sets fiber.Config.ReadBufferSize, which is the buffer size for reading requests coming from a
+	// single connection and also acts as a limit for the maximum header size.
+	//
+	// If you're getting occasional "Request Header Fields Too Large", you may want to try increasing this value.
+	//
+	// Defaults to DefaultReadBufferSize
+	ReadBufferSize int `yaml:"read-buffer-size,omitempty"`
 
-	tlsConfig      *tls.Config
-	tlsConfigError error
+	// TLS configuration (optional)
+	TLS *TLSConfig `yaml:"tls,omitempty"`
 }
 
 type TLSConfig struct {
-
-	// Optional public certificate for TLS in PEM format.
+	// CertificateFile is the public certificate for TLS in PEM format.
 	CertificateFile string `yaml:"certificate-file,omitempty"`
 
-	// Optional private key file for TLS in PEM format.
+	// PrivateKeyFile is the private key file for TLS in PEM format.
 	PrivateKeyFile string `yaml:"private-key-file,omitempty"`
 }
 
 // GetDefaultConfig returns a Config struct with the default values
 func GetDefaultConfig() *Config {
-	return &Config{Address: DefaultAddress, Port: DefaultPort}
+	return &Config{
+		Address:        DefaultAddress,
+		Port:           DefaultPort,
+		ReadBufferSize: DefaultReadBufferSize,
+	}
 }
 
 // ValidateAndSetDefaults validates the web configuration and sets the default values if necessary.
@@ -56,12 +71,23 @@ func (web *Config) ValidateAndSetDefaults() error {
 	} else if web.Port < 0 || web.Port > math.MaxUint16 {
 		return fmt.Errorf("invalid port: value should be between %d and %d", 0, math.MaxUint16)
 	}
+	// Validate ReadBufferSize
+	if web.ReadBufferSize == 0 {
+		web.ReadBufferSize = DefaultReadBufferSize // Not set? Use the default value.
+	} else if web.ReadBufferSize < MinimumReadBufferSize {
+		web.ReadBufferSize = MinimumReadBufferSize // Below the minimum? Use the minimum value.
+	}
 	// Try to load the TLS certificates
-	_, err := web.TLSConfig()
-	if err != nil {
-		return fmt.Errorf("invalid tls config: %w", err)
+	if web.TLS != nil {
+		if err := web.TLS.isValid(); err != nil {
+			return fmt.Errorf("invalid tls config: %w", err)
+		}
 	}
 	return nil
+}
+
+func (web *Config) HasTLS() bool {
+	return web.TLS != nil && len(web.TLS.CertificateFile) > 0 && len(web.TLS.PrivateKeyFile) > 0
 }
 
 // SocketAddress returns the combination of the Address and the Port
@@ -69,18 +95,13 @@ func (web *Config) SocketAddress() string {
 	return fmt.Sprintf("%s:%d", web.Address, web.Port)
 }
 
-// TLSConfig returns a tls.Config object for serving over an encrypted channel
-func (web *Config) TLSConfig() (*tls.Config, error) {
-	if web.tlsConfig == nil && len(web.Tls.CertificateFile) > 0 && len(web.Tls.PrivateKeyFile) > 0 {
-		web.loadTLSConfig()
+func (t *TLSConfig) isValid() error {
+	if len(t.CertificateFile) > 0 && len(t.PrivateKeyFile) > 0 {
+		_, err := tls.LoadX509KeyPair(t.CertificateFile, t.PrivateKeyFile)
+		if err != nil {
+			return err
+		}
+		return nil
 	}
-	return web.tlsConfig, web.tlsConfigError
-}
-
-func (web *Config) loadTLSConfig() {
-	cer, err := tls.LoadX509KeyPair(web.Tls.CertificateFile, web.Tls.PrivateKeyFile)
-	if err != nil {
-		web.tlsConfigError = err
-	}
-	web.tlsConfig = &tls.Config{Certificates: []tls.Certificate{cer}}
+	return errors.New("certificate-file and private-key-file must be specified")
 }
